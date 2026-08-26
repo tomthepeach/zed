@@ -20732,6 +20732,7 @@ name = "web_search_providers"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "client",
  "cloud_api_client",
  "cloud_api_types",
@@ -20740,7 +20741,10 @@ dependencies = [
  "gpui",
  "http_client",
  "language_model",
+ "log",
+ "serde",
  "serde_json",
+ "settings",
  "web_search",
 ]
 

@@ -2705,6 +2705,16 @@
     // Delay in milliseconds before showing the which-key popup.
     "delay_ms": 1000,
   },
+  // Web search provider for the agent's search_web tool.
+  // "provider" may be "zed" (default, Zed Cloud) or "searxng".
+  "web_search": {
+    "provider": "zed",
+    "searxng": {
+      "url": "",
+      "auth_username": null,
+      "auth_password": null,
+    },
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://zed.dev",

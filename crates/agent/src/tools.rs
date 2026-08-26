@@ -39,6 +39,7 @@ use serde::{
     Deserialize, Deserializer,
     de::{DeserializeOwned, Error as _},
 };
+use web_search::WebSearchRegistry;
 
 /// Deserialize a value that may have been provided as a JSON-encoded string
 /// instead of the structured value. Some models occasionally stringify nested
@@ -238,6 +239,7 @@ pub fn tool_feature_flag_enabled(tool_name: &str, cx: &App) -> bool {
         CreateThreadTool::NAME | ListAgentsAndModelsTool::NAME => {
             cx.has_flag::<CreateThreadToolFeatureFlag>()
         }
+        WebSearchTool::NAME => WebSearchRegistry::read_global(cx).active_provider().is_some(),
         _ => true,
     }
 }
