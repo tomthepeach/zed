@@ -31,24 +31,21 @@ fn register_web_search_providers(
         cx,
     );
 
-    cx.subscribe(
-        &LanguageModelRegistry::global(cx),
-        {
-            let client = client.clone();
-            let user_store = user_store.clone();
-            move |this, registry, event, cx| {
-                if let language_model::Event::DefaultModelChanged = event {
-                    apply_web_search_provider_selection(
-                        this,
-                        client.clone(),
-                        user_store.clone(),
-                        &registry,
-                        cx,
-                    )
-                }
+    cx.subscribe(&LanguageModelRegistry::global(cx), {
+        let client = client.clone();
+        let user_store = user_store.clone();
+        move |this, registry, event, cx| {
+            if let language_model::Event::DefaultModelChanged = event {
+                apply_web_search_provider_selection(
+                    this,
+                    client.clone(),
+                    user_store.clone(),
+                    &registry,
+                    cx,
+                )
             }
-        },
-    )
+        }
+    })
     .detach();
 
     cx.observe_global::<SettingsStore>(move |this, cx| {

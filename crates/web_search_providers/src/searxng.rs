@@ -114,8 +114,8 @@ async fn perform_searxng_search(
         .uri(url.as_str());
 
     if let (Some(username), Some(password)) = (&auth_username, &auth_password) {
-        let credentials = base64::engine::general_purpose::STANDARD
-            .encode(format!("{username}:{password}"));
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
         request = request.header("Authorization", format!("Basic {credentials}"));
     }
 
