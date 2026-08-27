@@ -304,8 +304,6 @@ actions!(
         ToggleThinkingEffortMenu,
         /// Toggles fast mode for models that support it.
         ToggleFastMode,
-        /// Toggles Plan Mode, which restricts the agent to writing a single plan file.
-        TogglePlanMode,
         /// Scroll the output by one page up.
         ScrollOutputPageUp,
         /// Scroll the output by one page down.

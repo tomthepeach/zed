@@ -97,10 +97,7 @@ impl ProfileSelector {
             return;
         }
 
-        let profiles: AvailableProfiles = AgentProfile::available_profiles(cx)
-            .into_iter()
-            .filter(|(id, _)| builtin_profiles::is_selectable(id))
-            .collect();
+        let profiles: AvailableProfiles = AgentProfile::available_profiles(cx);
         if profiles.is_empty() {
             return;
         }
@@ -357,7 +354,6 @@ impl ProfilePickerDelegate {
     fn candidates_from(profiles: AvailableProfiles) -> Vec<ProfileCandidate> {
         profiles
             .into_iter()
-            .filter(|(id, _)| builtin_profiles::is_selectable(id))
             .map(|(id, name)| ProfileCandidate {
                 is_builtin: builtin_profiles::is_builtin(&id),
                 id,
@@ -880,6 +876,25 @@ mod tests {
             entry,
             ProfilePickerEntry::Header(label) if label.as_ref() == "Custom Profiles"
         )));
+    }
+
+    #[gpui::test]
+    fn candidates_from_includes_plan(_cx: &mut TestAppContext) {
+        let mut profiles = AvailableProfiles::default();
+        profiles.insert(AgentProfileId("write".into()), SharedString::from("Write"));
+        profiles.insert(AgentProfileId("ask".into()), SharedString::from("Ask"));
+        profiles.insert(
+            AgentProfileId("minimal".into()),
+            SharedString::from("Minimal"),
+        );
+        profiles.insert(AgentProfileId("plan".into()), SharedString::from("Plan"));
+
+        let candidates = ProfilePickerDelegate::candidates_from(profiles);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.id.as_str() == builtin_profiles::PLAN)
+        );
     }
 
     #[gpui::test]

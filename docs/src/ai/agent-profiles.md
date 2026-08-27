@@ -16,8 +16,9 @@ Zed includes four built-in profiles:
 - `Write`: enables tools for reading, editing, and running commands.
 - `Ask`: focuses on read-only codebase questions.
 - `Minimal`: uses no project tools.
-- `Plan`: research and write a plan file only. Entered from the Plan Mode
-  toggle in the agent panel, not by selecting it as the default profile.
+- `Plan`: research and write a plan file only. Select it from the profile
+  picker like Write, Ask, or Minimal. Choosing Plan can become your
+  `default_profile`.
 
 ## Configure Profiles {#configure-profiles}
 

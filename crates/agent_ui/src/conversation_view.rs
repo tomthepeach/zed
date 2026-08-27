@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1 as acp;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
 use agent_servers::{AgentServer, GEMINI_TERMINAL_AUTH_METHOD_ID};
-use agent_settings::{AgentProfileId, AgentSettings};
+use agent_settings::{AgentProfileId, AgentSettings, builtin_profiles};
 use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
@@ -38,6 +38,7 @@ use language_model::{LanguageModelCompletionError, ProviderErrorCategory};
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont, MarkdownStyle,
 };
+use notifications::status_toast::StatusToast;
 use parking_lot::{Mutex, RwLock};
 use project::{AgentId, AgentServerStore, Project, ProjectEntryId, ProjectPath};
 
@@ -89,6 +90,7 @@ use crate::message_editor::{InputAttempt, MessageEditor, MessageEditorEvent};
 use crate::profile_selector::{ProfileProvider, ProfileSelector};
 
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
+use crate::thread_worktree_archive::all_open_workspaces;
 use crate::ui::{AgentNotification, AgentNotificationEvent};
 use crate::{
     Agent, AgentDiffPane, AgentInitialContent, AgentPanel, AgentPanelEvent, AllowAlways, AllowOnce,
@@ -97,7 +99,7 @@ use crate::{
     OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
     ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
     ScrollOutputToBottom, ScrollOutputToNextMessage, ScrollOutputToPreviousMessage,
-    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode, TogglePlanMode,
+    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode,
     ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
     ToggleThinkingMode, UndoLastReject,
 };
@@ -248,9 +250,20 @@ impl ProfileProvider for Entity<agent::Thread> {
 
     fn set_profile(&self, profile_id: AgentProfileId, cx: &mut App) {
         self.update(cx, |thread, cx| {
-            if thread.is_plan_mode()
-                && profile_id.as_str() != agent_settings::builtin_profiles::PLAN
-            {
+            if profile_id.as_str() == builtin_profiles::PLAN && !thread.is_plan_mode() {
+                let task = thread.enter_plan_mode(cx);
+                let project = thread.project().clone();
+                cx.spawn(async move |_, cx| {
+                    if let Err(error) = task.await {
+                        cx.update(|cx| {
+                            show_plan_mode_error_toast(error.to_string(), &project, cx);
+                        });
+                    }
+                })
+                .detach();
+                return;
+            }
+            if thread.is_plan_mode() && profile_id.as_str() != builtin_profiles::PLAN {
                 thread.exit_plan_mode_to(profile_id, cx).detach();
                 return;
             }
@@ -278,6 +291,29 @@ impl ProfileProvider for Entity<agent::Thread> {
     fn profile_downgraded(&self, cx: &App) -> bool {
         self.read(cx).profile_was_downgraded()
     }
+}
+
+fn show_plan_mode_error_toast(
+    message: impl Into<SharedString>,
+    project: &Entity<Project>,
+    cx: &mut App,
+) {
+    let Some(workspace) = all_open_workspaces(cx)
+        .into_iter()
+        .find(|workspace| workspace.read(cx).project() == project)
+    else {
+        return;
+    };
+    workspace.update(cx, |workspace, cx| {
+        let toast = StatusToast::new(message, cx, |this, _cx| {
+            this.icon(
+                Icon::new(IconName::Check)
+                    .size(IconSize::Small)
+                    .color(Color::Success),
+            )
+        });
+        workspace.toggle_status_toast(toast, cx);
+    });
 }
 
 #[derive(Default)]

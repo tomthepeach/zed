@@ -27,14 +27,6 @@ pub mod builtin_profiles {
             || profile_id.as_str() == MINIMAL
             || profile_id.as_str() == PLAN
     }
-
-    /// Whether this profile can be chosen from the profile picker.
-    ///
-    /// Plan mode is a thread overlay entered via its own toggle, not a
-    /// selectable default profile.
-    pub fn is_selectable(profile_id: &AgentProfileId) -> bool {
-        profile_id.as_str() != PLAN
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

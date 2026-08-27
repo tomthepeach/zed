@@ -4434,8 +4434,7 @@ impl ThreadView {
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
                                     .children(self.render_fast_mode_control(cx))
-                                    .children(self.render_thinking_control(cx))
-                                    .children(self.render_plan_mode_control(cx)),
+                                    .children(self.render_thinking_control(cx)),
                             )
                             .child(
                                 h_flex()
@@ -5391,91 +5390,6 @@ impl ThreadView {
                 y: px(-2.0),
             })
             .anchor(gpui::Anchor::BottomLeft)
-    }
-
-    fn render_plan_mode_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let thread = self.as_native_thread(cx)?;
-        let is_plan_mode = thread.read(cx).is_plan_mode();
-
-        let (tooltip_label, icon, color) = if is_plan_mode {
-            ("Disable Plan Mode", IconName::ListTodo, Color::Accent)
-        } else {
-            (
-                "Enable Plan Mode",
-                IconName::ListTodo,
-                Color::Custom(cx.theme().colors().icon_disabled.opacity(0.8)),
-            )
-        };
-
-        let focus_handle = self.message_editor.focus_handle(cx);
-
-        Some(
-            IconButton::new("plan-mode", icon)
-                .icon_size(IconSize::Small)
-                .icon_color(color)
-                .tooltip(move |_, cx| {
-                    Tooltip::for_action_in(tooltip_label, &TogglePlanMode, &focus_handle, cx)
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_plan_mode(window, cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
-    fn toggle_plan_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(thread) = self.as_native_thread(cx) else {
-            return;
-        };
-
-        if thread.read(cx).is_plan_mode() {
-            let task = thread.update(cx, |thread, cx| thread.exit_plan_mode(cx));
-            let workspace = self.workspace.clone();
-            cx.spawn_in(window, async move |this, cx| match task.await {
-                Ok(exit) => {
-                    if let Some(warning) = exit.warning {
-                        this.update(cx, |this, cx| {
-                            this.show_local_command_toast(warning, cx);
-                        })
-                        .ok();
-                    }
-                    if let Some(plan_file) = exit.plan_file {
-                        this.update_in(cx, |_, window, cx| {
-                            workspace
-                                .update(cx, |workspace, cx| {
-                                    workspace.open_path(
-                                        plan_file.project_path,
-                                        None,
-                                        true,
-                                        window,
-                                        cx,
-                                    )
-                                })
-                                .ok();
-                        })
-                        .ok();
-                    }
-                }
-                Err(error) => {
-                    this.update(cx, |this, cx| {
-                        this.show_local_command_toast(error.to_string(), cx);
-                    })
-                    .ok();
-                }
-            })
-            .detach();
-        } else {
-            let task = thread.update(cx, |thread, cx| thread.enter_plan_mode(cx));
-            cx.spawn(async move |this, cx| {
-                if let Err(error) = task.await {
-                    this.update(cx, |this, cx| {
-                        this.show_local_command_toast(error.to_string(), cx);
-                    })
-                    .ok();
-                }
-            })
-            .detach();
-        }
     }
 
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -12357,9 +12271,6 @@ impl Render for ThreadView {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(|this, _: &ToggleFastMode, window, cx| {
                 this.toggle_fast_mode(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &TogglePlanMode, window, cx| {
-                this.toggle_plan_mode(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleThinkingMode, _window, cx| {
                 if this.thread.read(cx).status() != ThreadStatus::Idle {
