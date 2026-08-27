@@ -47,7 +47,7 @@ use language_model::{
     LanguageModelToolUse, LanguageModelToolUseId, MessageContent, ProviderErrorCategory, Role,
     SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
-use project::{Project, trusted_worktrees::TrustedWorktrees};
+use project::{Project, ProjectPath, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
 use schemars::{JsonSchema, Schema};
 use serde::de::DeserializeOwned;
@@ -66,6 +66,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use util::rel_path::RelPath;
 use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle};
 use uuid::Uuid;
 
@@ -146,6 +147,68 @@ pub struct SubagentContext {
 
     /// Current depth level (0 = root agent, 1 = first-level subagent, etc.)
     pub depth: u8,
+}
+
+/// The single file a plan-mode thread is allowed to write.
+#[derive(Clone, Debug)]
+pub struct PlanFile {
+    pub absolute_path: PathBuf,
+    pub display_path: String,
+    pub project_path: ProjectPath,
+}
+
+/// Persisted form of [`PlanFile`]. `project_path`'s worktree id is not stable
+/// across reloads, so we store the relative path and rebind it on load.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DbPlanFile {
+    pub absolute_path: PathBuf,
+    pub display_path: String,
+    pub relative_path: String,
+}
+
+impl PlanFile {
+    fn to_db(&self) -> DbPlanFile {
+        DbPlanFile {
+            absolute_path: self.absolute_path.clone(),
+            display_path: self.display_path.clone(),
+            relative_path: self.project_path.path.as_unix_str().to_string(),
+        }
+    }
+}
+
+/// Result of leaving plan mode. A warning is set when the plan file is missing
+/// or empty; the user is not blocked from exiting.
+#[derive(Clone, Debug)]
+pub struct PlanModeExit {
+    pub plan_file: Option<PlanFile>,
+    pub warning: Option<String>,
+}
+
+/// A user-role history marker appended when plan mode is entered or exited.
+/// Forwarded to the ACP thread so it appears in the transcript.
+pub struct HistoryNotice(pub UserMessage);
+
+const PLAN_DIRECTORY: &str = ".zed/plans";
+const PLAN_GITIGNORE_CONTENTS: &[u8] = b"*\n!.gitignore\n";
+const SUBAGENT_PLAN_MODE_ERROR: &str = "Subagents are read-only during plan mode. Report findings to the planning agent, which will write the plan.";
+
+fn sanitize_for_plan_filename(id: &str) -> String {
+    id.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn normalize_tool_name_for_lookup(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect()
 }
 
 /// The ID of the user prompt that initiated a request.
@@ -1293,6 +1356,14 @@ pub struct Thread {
     /// Whether `profile_id` was downgraded to `minimal` at thread start because
     /// the workspace is restricted. Used purely to surface a warning in the UI.
     profile_downgraded_for_restricted_workspace: bool,
+    /// The plan file this thread may write while the `plan` profile is active.
+    plan_file: Option<PlanFile>,
+    /// Profile to restore when leaving plan mode. Never hardcoded to `write`.
+    pre_plan_profile: Option<AgentProfileId>,
+    /// Set on subagents spawned (or resumed) while a parent is in plan mode.
+    /// Those threads stay read-only for their lifetime and never receive the
+    /// parent's plan-file write allowance.
+    read_only_during_plan_mode: bool,
     project_context: Entity<ProjectContext>,
     pub(crate) templates: Arc<Templates>,
     model: ThreadModel,
@@ -1351,6 +1422,9 @@ impl Thread {
             depth: parent_thread.read(cx).depth() + 1,
         });
         thread.inherit_parent_settings(parent_thread, cx);
+        if parent_thread.read(cx).is_plan_mode_or_plan_subagent() {
+            thread.clamp_to_plan_mode_subagent();
+        }
         if let Some(subagent_model) = AgentSettings::get_global(cx).subagent_model.clone() {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&subagent_model, cx);
@@ -1408,7 +1482,7 @@ impl Thread {
             None => Self::user_configured_model_selection(cx)
                 .map_or(ThreadModel::Unset, ThreadModel::Unresolved),
         };
-        Self {
+        let mut thread = Self {
             id: acp::SessionId::new(uuid::Uuid::new_v4().to_string()),
             prompt_id: PromptId::new(),
             updated_at: Utc::now(),
@@ -1436,6 +1510,9 @@ impl Thread {
             context_server_registry,
             profile_id,
             profile_downgraded_for_restricted_workspace,
+            plan_file: None,
+            pre_plan_profile: None,
+            read_only_during_plan_mode: false,
             project_context,
             templates,
             model,
@@ -1454,7 +1531,9 @@ impl Thread {
             inherits_parent_model_settings: true,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
-        }
+        };
+        thread.initialize_plan_mode_if_needed(cx);
+        thread
     }
 
     /// Copies runtime-mutable settings from the parent thread so that
@@ -1787,8 +1866,9 @@ impl Thread {
         );
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let db_plan_file = db_thread.plan_file;
 
-        Self {
+        let mut thread = Self {
             id,
             prompt_id: PromptId::new(),
             title: if db_thread.title.is_empty() {
@@ -1814,6 +1894,9 @@ impl Thread {
             context_server_registry,
             profile_id,
             profile_downgraded_for_restricted_workspace: false,
+            plan_file: None,
+            pre_plan_profile: db_thread.pre_plan_profile,
+            read_only_during_plan_mode: db_thread.read_only_during_plan_mode,
             project_context,
             templates,
             model,
@@ -1838,7 +1921,12 @@ impl Thread {
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
             ))),
+        };
+        thread.restore_plan_file_from_db(db_plan_file, cx);
+        if thread.read_only_during_plan_mode {
+            thread.clamp_to_plan_mode_subagent();
         }
+        thread
     }
 
     pub fn sandbox_status(&self, cx: &App) -> Option<(ThreadSandbox, ThreadSandbox)> {
@@ -1935,6 +2023,9 @@ impl Thread {
             }),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
+            plan_file: self.plan_file.as_ref().map(PlanFile::to_db),
+            pre_plan_profile: self.pre_plan_profile.clone(),
+            read_only_during_plan_mode: self.read_only_during_plan_mode,
         };
 
         cx.background_spawn(async move {
@@ -2243,6 +2334,10 @@ impl Thread {
     /// `minimal` are unmodified, shipped defaults, so we never override a user's
     /// custom or customized profiles.
     ///
+    /// The `plan` profile is not downgraded: its writes are already clamped to
+    /// a single plan file, and downgrading to `minimal` would make the Plan Mode
+    /// toggle a no-op.
+    ///
     /// Returns the (possibly downgraded) profile and whether a downgrade
     /// happened.
     fn profile_for_restricted_workspace(
@@ -2273,18 +2368,391 @@ impl Thread {
             return;
         }
 
-        self.profile_id = profile_id.clone();
+        self.apply_profile_without_subagents(profile_id.clone(), cx);
 
-        // Swap to the profile's preferred model when available.
+        for subagent in &self.running_subagents {
+            subagent
+                .update(cx, |thread, cx| {
+                    if thread.read_only_during_plan_mode {
+                        return;
+                    }
+                    thread.set_profile(profile_id.clone(), cx);
+                })
+                .ok();
+        }
+    }
+
+    fn apply_profile_without_subagents(
+        &mut self,
+        profile_id: AgentProfileId,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_id = profile_id;
+
         if let Some(model) = Self::resolve_profile_model(&self.profile_id, cx) {
             self.set_model(model, cx);
         }
 
+        self.refresh_turn_tools(cx);
+    }
+
+    pub fn is_plan_mode(&self) -> bool {
+        self.profile_id.as_str() == builtin_profiles::PLAN
+    }
+
+    pub fn is_plan_mode_or_plan_subagent(&self) -> bool {
+        self.is_plan_mode() || self.read_only_during_plan_mode
+    }
+
+    pub fn plan_file(&self) -> Option<&PlanFile> {
+        self.plan_file.as_ref()
+    }
+
+    pub fn read_only_during_plan_mode(&self) -> bool {
+        self.read_only_during_plan_mode
+    }
+
+    fn clamp_to_plan_mode_subagent(&mut self) {
+        self.profile_id = AgentProfileId(builtin_profiles::ASK.into());
+        self.read_only_during_plan_mode = true;
+        self.plan_file = None;
+        self.pre_plan_profile = None;
+    }
+
+    fn initialize_plan_mode_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.is_plan_mode() {
+            return;
+        }
+        if let Ok(plan_file) = self.resolve_plan_file(cx) {
+            self.plan_file = Some(plan_file);
+            if self.pre_plan_profile.is_none() {
+                self.pre_plan_profile = Some(AgentProfileId(builtin_profiles::WRITE.into()));
+            }
+            cx.spawn(async move |this, cx| {
+                this.update(cx, |this, cx| this.ensure_plan_directory(cx))?
+                    .await
+            })
+            .detach();
+        }
+    }
+
+    fn restore_plan_file_from_db(&mut self, db_plan_file: Option<DbPlanFile>, cx: &App) {
+        let Some(db_plan_file) = db_plan_file else {
+            return;
+        };
+        let relative_path = RelPath::from_unix_str(&db_plan_file.relative_path)
+            .ok()
+            .map(|path| path.into_arc());
+        let project_path = relative_path.and_then(|relative_path| {
+            let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
+            let worktree = worktree.read(cx);
+            Some(ProjectPath {
+                worktree_id: worktree.id(),
+                path: relative_path,
+            })
+        });
+        let Some(project_path) = project_path else {
+            self.plan_file = Some(PlanFile {
+                absolute_path: db_plan_file.absolute_path,
+                display_path: db_plan_file.display_path,
+                project_path: ProjectPath {
+                    worktree_id: project::WorktreeId::from_usize(0),
+                    path: RelPath::empty_arc(),
+                },
+            });
+            return;
+        };
+        let absolute_path = self
+            .project
+            .read(cx)
+            .absolute_path(&project_path, cx)
+            .unwrap_or(db_plan_file.absolute_path);
+        self.plan_file = Some(PlanFile {
+            absolute_path,
+            display_path: db_plan_file.display_path,
+            project_path,
+        });
+    }
+
+    fn resolve_plan_file(&self, cx: &App) -> Result<PlanFile> {
+        let worktree = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .context("Plan mode requires a visible worktree")?;
+        let worktree = worktree.read(cx);
+        let relative_path = RelPath::from_unix_str(&format!(
+            "{PLAN_DIRECTORY}/{}.md",
+            sanitize_for_plan_filename(&self.id.to_string())
+        ))
+        .context("invalid plan file path")?
+        .into_arc();
+        let project_path = ProjectPath {
+            worktree_id: worktree.id(),
+            path: relative_path.clone(),
+        };
+        let absolute_path = worktree.absolutize(&relative_path);
+        let display_path = format!(
+            "{}/{}",
+            worktree.root_name().as_unix_str(),
+            relative_path.as_unix_str()
+        );
+        Ok(PlanFile {
+            absolute_path,
+            display_path,
+            project_path,
+        })
+    }
+
+    fn ensure_plan_directory(&self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let Some(plan_file) = self.plan_file.clone() else {
+            return Task::ready(Ok(()));
+        };
+        let project = self.project.clone();
+        let plans_rel = match RelPath::from_unix_str(PLAN_DIRECTORY) {
+            Ok(path) => path.into_arc(),
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let gitignore_rel = match RelPath::from_unix_str(&format!("{PLAN_DIRECTORY}/.gitignore")) {
+            Ok(path) => path.into_arc(),
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let plans_project_path = ProjectPath {
+            worktree_id: plan_file.project_path.worktree_id,
+            path: plans_rel.clone(),
+        };
+        let gitignore_project_path = ProjectPath {
+            worktree_id: plan_file.project_path.worktree_id,
+            path: gitignore_rel.clone(),
+        };
+
+        cx.spawn(async move |_, cx| {
+            let (plans_is_file, gitignore_is_dir, worktree) =
+                project.read_with(cx, |project, cx| {
+                    let plans_is_file = project
+                        .entry_for_path(&plans_project_path, cx)
+                        .is_some_and(|entry| entry.is_file());
+                    let gitignore_is_dir = project
+                        .entry_for_path(&gitignore_project_path, cx)
+                        .is_some_and(|entry| entry.is_dir());
+                    let worktree = project.worktree_for_id(plan_file.project_path.worktree_id, cx);
+                    (plans_is_file, gitignore_is_dir, worktree)
+                });
+
+            if plans_is_file {
+                anyhow::bail!(
+                    "{} exists as a file; cannot create the plan directory",
+                    PLAN_DIRECTORY
+                );
+            }
+            if gitignore_is_dir {
+                anyhow::bail!("{PLAN_DIRECTORY}/.gitignore exists as a directory");
+            }
+
+            let Some(worktree) = worktree else {
+                anyhow::bail!("Plan mode requires a visible worktree");
+            };
+
+            let plans_missing = project.read_with(cx, |project, cx| {
+                project.entry_for_path(&plans_project_path, cx).is_none()
+            });
+            if plans_missing {
+                worktree
+                    .update(cx, |worktree, cx| {
+                        worktree.create_entry(plans_rel, true, None, cx)
+                    })
+                    .await?;
+            }
+
+            let gitignore_missing = project.read_with(cx, |project, cx| {
+                project
+                    .entry_for_path(&gitignore_project_path, cx)
+                    .is_none()
+            });
+            if gitignore_missing {
+                worktree
+                    .update(cx, |worktree, cx| {
+                        worktree.create_entry(
+                            gitignore_rel,
+                            false,
+                            Some(PLAN_GITIGNORE_CONTENTS.to_vec()),
+                            cx,
+                        )
+                    })
+                    .await?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn enter_plan_mode(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        if self.is_plan_mode() {
+            if self.plan_file.is_some() {
+                return Task::ready(Ok(()));
+            }
+        } else {
+            self.pre_plan_profile = Some(self.profile_id.clone());
+        }
+
+        match self.resolve_plan_file(cx) {
+            Ok(plan_file) => self.plan_file = Some(plan_file),
+            Err(error) => return Task::ready(Err(error)),
+        }
+
+        self.apply_profile_without_subagents(AgentProfileId(builtin_profiles::PLAN.into()), cx);
+        self.clamp_running_subagents_for_plan_mode(cx);
+
+        let display_path = self
+            .plan_file
+            .as_ref()
+            .map(|plan_file| plan_file.display_path.clone())
+            .unwrap_or_default();
+        self.append_plan_mode_notice(
+            format!("[Plan mode active. Only {display_path} may be edited.]"),
+            cx,
+        );
+
+        let ensure = self.ensure_plan_directory(cx);
+        cx.spawn(async move |_, _| ensure.await)
+    }
+
+    pub fn exit_plan_mode(&mut self, cx: &mut Context<Self>) -> Task<Result<PlanModeExit>> {
+        let Some(restore_profile) = self.pre_plan_profile.clone() else {
+            return Task::ready(Err(anyhow!(
+                "Cannot exit plan mode: previous profile was not recorded"
+            )));
+        };
+        self.exit_plan_mode_to(restore_profile, cx)
+    }
+
+    pub fn exit_plan_mode_to(
+        &mut self,
+        profile_id: AgentProfileId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PlanModeExit>> {
+        let plan_file = self.plan_file.clone();
+        let project = self.project.clone();
+
+        self.pre_plan_profile = None;
+        self.apply_profile_without_subagents(profile_id, cx);
+
+        let display_path = plan_file
+            .as_ref()
+            .map(|plan_file| plan_file.display_path.clone())
+            .unwrap_or_else(|| "the plan file".to_string());
+        self.append_plan_mode_notice(
+            format!(
+                "[Plan mode exited. The plan at {display_path} is approved. Write tools are now available — implement it.]"
+            ),
+            cx,
+        );
+
+        cx.spawn(async move |_, cx| {
+            let warning = if let Some(plan_file) = plan_file.as_ref() {
+                let contents = project
+                    .read_with(cx, |project, _| project.fs().clone())
+                    .load(&plan_file.absolute_path)
+                    .await;
+                match contents {
+                    Ok(text) if text.trim().is_empty() => Some(format!(
+                        "The plan file at {} is empty. Switching to write mode anyway.",
+                        plan_file.display_path
+                    )),
+                    Err(_) => Some(format!(
+                        "The plan file at {} is missing. Switching to write mode anyway.",
+                        plan_file.display_path
+                    )),
+                    Ok(_) => None,
+                }
+            } else {
+                Some("No plan file was created. Switching to write mode anyway.".into())
+            };
+            Ok(PlanModeExit { plan_file, warning })
+        })
+    }
+
+    fn clamp_running_subagents_for_plan_mode(&mut self, cx: &mut Context<Self>) {
         for subagent in &self.running_subagents {
             subagent
-                .update(cx, |thread, cx| thread.set_profile(profile_id.clone(), cx))
+                .update(cx, |thread, cx| {
+                    thread.clamp_to_plan_mode_subagent();
+                    thread.refresh_turn_tools(cx);
+                })
                 .ok();
         }
+    }
+
+    fn append_plan_mode_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        let message = UserMessage {
+            id: ClientUserMessageId::new(),
+            content: vec![UserMessageContent::Text(text)].into(),
+        };
+        self.messages.push(Arc::new(Message::User(message.clone())));
+        cx.emit(HistoryNotice(message));
+        cx.notify();
+    }
+
+    pub fn plan_mode_file_edit_error(&self, path: Option<&Path>, _cx: &App) -> Option<String> {
+        if self.read_only_during_plan_mode {
+            return Some(SUBAGENT_PLAN_MODE_ERROR.to_string());
+        }
+        if !self.is_plan_mode() {
+            return None;
+        }
+        let Some(plan_file) = &self.plan_file else {
+            return Some(
+                "Plan mode is active, but no plan file has been created yet. Only the plan file may be edited."
+                    .into(),
+            );
+        };
+        match path {
+            Some(path) if self.paths_refer_to_plan_file(path) => None,
+            Some(_) => Some(format!(
+                "Plan mode is active. The only file that may be edited is {}. Make no implementation changes; write the plan there, then ask the user to switch to write mode.",
+                plan_file.display_path
+            )),
+            None => Some(format!(
+                "Plan mode is active. This tool cannot be used. The only writable path is {}.",
+                plan_file.display_path
+            )),
+        }
+    }
+
+    pub fn is_plan_file_path(&self, path: &Path) -> bool {
+        self.is_plan_mode() && self.paths_refer_to_plan_file(path)
+    }
+
+    fn paths_refer_to_plan_file(&self, path: &Path) -> bool {
+        let Some(plan_file) = &self.plan_file else {
+            return false;
+        };
+        if path == plan_file.absolute_path {
+            return true;
+        }
+        if path.as_os_str() == std::ffi::OsStr::new(&plan_file.display_path) {
+            return true;
+        }
+        let relative = plan_file.project_path.path.as_std_path();
+        if path == relative || path.ends_with(relative) {
+            return true;
+        }
+        if let (Ok(canonical_path), Ok(canonical_plan)) =
+            (path.canonicalize(), plan_file.absolute_path.canonicalize())
+        {
+            if canonical_path == canonical_plan {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn clamp_resumed_subagent_for_plan_mode(subagent: &Entity<Thread>, cx: &mut App) {
+        subagent.update(cx, |thread, cx| {
+            thread.clamp_to_plan_mode_subagent();
+            thread.refresh_turn_tools(cx);
+        });
     }
 
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> Task<()> {
@@ -4235,13 +4703,20 @@ impl Thread {
     }
 
     fn tool(&self, name: &str) -> Option<Arc<dyn AnyAgentTool>> {
-        self.running_turn.as_ref()?.tools.get(name).cloned()
+        let tools = &self.running_turn.as_ref()?.tools;
+        if let Some(tool) = tools.get(name) {
+            return Some(tool.clone());
+        }
+        let normalized_requested = normalize_tool_name_for_lookup(name);
+        let match_name = tools
+            .keys()
+            .find(|tool_name| normalize_tool_name_for_lookup(tool_name) == normalized_requested)?;
+        log::info!("Resolved tool call `{name}` to `{match_name}` via normalized name fallback");
+        tools.get(match_name).cloned()
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.running_turn
-            .as_ref()
-            .is_some_and(|turn| turn.tools.contains_key(name))
+        self.tool(name).is_some()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4332,6 +4807,11 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+            plan_mode: self.is_plan_mode(),
+            plan_file: self
+                .plan_file
+                .as_ref()
+                .map(|plan_file| plan_file.display_path.clone()),
         }
         .render(&self.templates)
         .context("failed to build system prompt")
@@ -4904,6 +5384,8 @@ impl EventEmitter<TitleUpdated> for Thread {}
 pub struct ModelChanged;
 
 impl EventEmitter<ModelChanged> for Thread {}
+
+impl EventEmitter<HistoryNotice> for Thread {}
 
 /// A channel-based wrapper that delivers tool input to a running tool.
 ///
@@ -5511,6 +5993,22 @@ impl ToolCallEventStream {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_with_thread(thread: WeakEntity<Thread>) -> (Self, ToolCallEventStreamReceiver) {
+        let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
+        let (_cancellation_tx, cancellation_rx) = watch::channel(false);
+        let stream = ToolCallEventStream::new(
+            "test_id".into(),
+            acp::ToolCallId::new("0:test_id"),
+            ThreadEventStream(events_tx),
+            None,
+            cancellation_rx,
+            Rc::new(RefCell::new(ThreadSandboxGrants::default())),
+            Some(thread),
+        );
+        (stream, ToolCallEventStreamReceiver(events_rx))
+    }
+
     /// Signal cancellation for this event stream. Only available in tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn signal_cancellation_with_sender(cancellation_tx: &mut watch::Sender<bool>) {
@@ -5587,6 +6085,14 @@ impl ToolCallEventStream {
     /// The ACP-facing id for this tool call (see [`scoped_tool_call_id`]).
     pub fn tool_call_id(&self) -> &acp::ToolCallId {
         &self.tool_call_id
+    }
+
+    pub fn plan_mode_error(&self, path: Option<&Path>, cx: &App) -> Option<String> {
+        self.thread
+            .as_ref()?
+            .upgrade()?
+            .read(cx)
+            .plan_mode_file_edit_error(path, cx)
     }
 
     pub fn update_fields(&self, fields: acp::ToolCallUpdateFields) {

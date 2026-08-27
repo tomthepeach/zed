@@ -161,6 +161,12 @@ impl AgentTool for SpawnAgentTool {
                     session_info: None,
                 })?;
 
+            let read_only_note = cx.update(|cx| {
+                event_stream.plan_mode_error(None, cx).map(|_| {
+                    "This subagent is read-only because the parent is in plan mode. Report findings; the planning agent will write the plan.".to_string()
+                })
+            });
+
             let (subagent, mut session_info) = cx.update(|cx| {
                 let subagent = if let Some(session_id) = input.session_id {
                     self.environment.resume_subagent(session_id, cx)
@@ -212,14 +218,20 @@ impl AgentTool for SpawnAgentTool {
             )]));
 
             let (output, result) = match send_result {
-                Ok(output) => (
-                    output.clone(),
-                    Ok(SpawnAgentToolOutput::Success {
-                        session_id: session_info.session_id.clone(),
-                        session_info,
-                        output,
-                    }),
-                ),
+                Ok(output) => {
+                    let output = match &read_only_note {
+                        Some(note) => format!("{output}\n\n{note}"),
+                        None => output,
+                    };
+                    (
+                        output.clone(),
+                        Ok(SpawnAgentToolOutput::Success {
+                            session_id: session_info.session_id.clone(),
+                            session_info,
+                            output,
+                        }),
+                    )
+                }
                 Err(e) => {
                     let error = e.to_string();
                     (

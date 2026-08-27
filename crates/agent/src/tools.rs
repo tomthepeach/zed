@@ -239,7 +239,9 @@ pub fn tool_feature_flag_enabled(tool_name: &str, cx: &App) -> bool {
         CreateThreadTool::NAME | ListAgentsAndModelsTool::NAME => {
             cx.has_flag::<CreateThreadToolFeatureFlag>()
         }
-        WebSearchTool::NAME => WebSearchRegistry::read_global(cx).active_provider().is_some(),
+        WebSearchTool::NAME => WebSearchRegistry::read_global(cx)
+            .active_provider()
+            .is_some(),
         _ => true,
     }
 }

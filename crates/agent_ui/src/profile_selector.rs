@@ -97,7 +97,10 @@ impl ProfileSelector {
             return;
         }
 
-        let profiles = AgentProfile::available_profiles(cx);
+        let profiles: AvailableProfiles = AgentProfile::available_profiles(cx)
+            .into_iter()
+            .filter(|(id, _)| builtin_profiles::is_selectable(id))
+            .collect();
         if profiles.is_empty() {
             return;
         }
@@ -354,6 +357,7 @@ impl ProfilePickerDelegate {
     fn candidates_from(profiles: AvailableProfiles) -> Vec<ProfileCandidate> {
         profiles
             .into_iter()
+            .filter(|(id, _)| builtin_profiles::is_selectable(id))
             .map(|(id, name)| ProfileCandidate {
                 is_builtin: builtin_profiles::is_builtin(&id),
                 id,
@@ -391,6 +395,7 @@ impl ProfilePickerDelegate {
             builtin_profiles::WRITE => Some("Get help to write anything."),
             builtin_profiles::ASK => Some("Chat about your codebase."),
             builtin_profiles::MINIMAL => Some("Chat about anything with no tools."),
+            builtin_profiles::PLAN => Some("Research the codebase and write a plan."),
             _ => None,
         }
     }

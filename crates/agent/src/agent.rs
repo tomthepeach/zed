@@ -832,6 +832,7 @@ impl NativeAgent {
         let subscriptions = vec![
             cx.subscribe(&thread_handle, Self::handle_thread_title_updated),
             cx.subscribe(&thread_handle, Self::handle_thread_token_usage_updated),
+            cx.subscribe(&thread_handle, Self::handle_thread_history_notice),
             cx.observe(&thread_handle, move |this, thread, cx| {
                 this.save_thread(thread, cx)
             }),
@@ -1348,6 +1349,26 @@ impl NativeAgent {
         };
         session.acp_thread.update(cx, |acp_thread, cx| {
             acp_thread.update_token_usage(usage.0.clone(), cx);
+        });
+    }
+
+    fn handle_thread_history_notice(
+        &mut self,
+        thread: Entity<Thread>,
+        notice: &HistoryNotice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(thread.read(cx).id()) else {
+            return;
+        };
+        session.acp_thread.update(cx, |acp_thread, cx| {
+            for content in &*notice.0.content {
+                acp_thread.push_user_content_block(
+                    Some(notice.0.id.clone()),
+                    content.clone().into(),
+                    cx,
+                );
+            }
         });
     }
 
@@ -3163,6 +3184,12 @@ impl NativeThreadEnvironment {
         let depth = subagent_thread.read(cx).depth();
 
         if let Some(parent_thread_entity) = self.thread.upgrade() {
+            if parent_thread_entity
+                .read(cx)
+                .is_plan_mode_or_plan_subagent()
+            {
+                crate::Thread::clamp_resumed_subagent_for_plan_mode(&subagent_thread, cx);
+            }
             telemetry::event!(
                 "Subagent Started",
                 session = parent_thread_entity.read(cx).id().to_string(),

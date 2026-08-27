@@ -3,8 +3,9 @@ use acp_thread::{
     AgentConnection, AgentModelGroupName, AgentModelList, ClientUserMessageId, PermissionOptions,
     ThreadStatus,
 };
+use action_log::ActionLog;
 use agent_client_protocol::schema::v1 as acp;
-use agent_settings::AgentProfileId;
+use agent_settings::{AgentProfileId, builtin_profiles};
 use anyhow::Result;
 use client::{Client, RefreshLlmTokenListener, UserStore};
 use collections::IndexMap;
@@ -8747,4 +8748,576 @@ async fn test_mid_turn_model_and_settings_refresh(cx: &mut TestAppContext) {
 
     // Thinking should now be enabled.
     assert!(model_b_completions[0].thinking_allowed);
+}
+
+#[gpui::test]
+async fn test_plan_mode_enter_exit_restores_profile(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let thread = cx.new(|cx| {
+        Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        )
+    });
+
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId(builtin_profiles::ASK.into()), cx);
+    });
+
+    thread
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    thread.read_with(cx, |thread, _cx| {
+        assert!(thread.is_plan_mode());
+        assert!(thread.plan_file().is_some());
+        assert!(
+            thread
+                .last_received_or_pending_message()
+                .is_some_and(|message| message.to_markdown().contains("Plan mode active"))
+        );
+    });
+
+    let exit = thread
+        .update(cx, |thread, cx| thread.exit_plan_mode(cx))
+        .await
+        .unwrap();
+    assert!(exit.warning.is_some());
+    thread.read_with(cx, |thread, _cx| {
+        assert_eq!(thread.profile().as_str(), builtin_profiles::ASK);
+        assert!(!thread.is_plan_mode());
+        assert!(
+            thread
+                .last_received_or_pending_message()
+                .is_some_and(|message| message.to_markdown().contains("Plan mode exited"))
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_plan_mode_file_edit_guard(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/test"),
+        json!({ "src": { "main.rs": "fn main() {}" } }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let thread = cx.new(|cx| {
+        Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        )
+    });
+
+    thread
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    thread.read_with(cx, |thread, cx| {
+        let plan_path = thread.plan_file().unwrap().absolute_path.clone();
+        let error =
+            thread.plan_mode_file_edit_error(Some(Path::new(path!("/test/src/main.rs"))), cx);
+        assert!(error.unwrap().contains("The only file that may be edited"));
+        assert!(
+            thread
+                .plan_mode_file_edit_error(Some(&plan_path), cx)
+                .is_none()
+        );
+        assert!(thread.is_plan_file_path(&plan_path));
+        assert!(
+            thread
+                .plan_mode_file_edit_error(None, cx)
+                .unwrap()
+                .contains("This tool cannot be used")
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_plan_mode_subagent_is_read_only(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let parent = cx.new(|cx| {
+        Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        )
+    });
+
+    parent
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    let subagent = cx.new(|cx| {
+        let mut thread = Thread::new_subagent(&parent, cx);
+        thread.add_default_tools(Rc::new(FakeThreadEnvironment::default()), cx);
+        thread
+    });
+    subagent.read_with(cx, |subagent, cx| {
+        assert_eq!(subagent.profile().as_str(), builtin_profiles::ASK);
+        assert!(subagent.read_only_during_plan_mode());
+        assert!(subagent.plan_file().is_none());
+        let error = subagent.plan_mode_file_edit_error(Some(Path::new(path!("/test/foo.rs"))), cx);
+        assert!(error.unwrap().contains("Subagents are read-only"));
+        let plan_path = parent.read(cx).plan_file().unwrap().absolute_path.clone();
+        let plan_error = subagent.plan_mode_file_edit_error(Some(&plan_path), cx);
+        assert!(plan_error.unwrap().contains("Subagents are read-only"));
+        assert!(!subagent.has_registered_tool(SpawnAgentTool::NAME));
+    });
+
+    parent.update(cx, |thread, _cx| {
+        thread.register_running_subagent(subagent.downgrade());
+    });
+    parent.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId(builtin_profiles::WRITE.into()), cx);
+    });
+    subagent.read_with(cx, |subagent, _cx| {
+        assert!(subagent.read_only_during_plan_mode());
+        assert_eq!(subagent.profile().as_str(), builtin_profiles::ASK);
+    });
+
+    let grandchild = cx.new(|cx| {
+        let mut thread = Thread::new_subagent(&subagent, cx);
+        thread.add_default_tools(Rc::new(FakeThreadEnvironment::default()), cx);
+        thread
+    });
+    grandchild.read_with(cx, |grandchild, _cx| {
+        assert!(grandchild.read_only_during_plan_mode());
+        assert_eq!(grandchild.profile().as_str(), builtin_profiles::ASK);
+        assert!(grandchild.plan_file().is_none());
+        assert!(!grandchild.has_registered_tool(SpawnAgentTool::NAME));
+    });
+}
+
+#[gpui::test]
+async fn test_plan_mode_persists_across_reload(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let templates = Templates::new();
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context.clone(),
+            context_server_registry.clone(),
+            templates.clone(),
+            Some(model),
+            cx,
+        )
+    });
+
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId(builtin_profiles::ASK.into()), cx);
+    });
+    thread
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    let session_id = thread.read_with(cx, |thread, _| thread.id().clone());
+    let db_thread = thread.update(cx, |thread, cx| thread.to_db(cx)).await;
+
+    let restored = cx.new(|cx| {
+        Thread::from_db(
+            session_id,
+            db_thread,
+            project,
+            project_context,
+            context_server_registry,
+            templates,
+            cx,
+        )
+    });
+
+    restored.read_with(cx, |thread, cx| {
+        assert!(thread.is_plan_mode());
+        assert!(thread.plan_file().is_some());
+        let plan_path = thread.plan_file().unwrap().absolute_path.clone();
+        assert!(
+            thread
+                .plan_mode_file_edit_error(Some(&plan_path), cx)
+                .is_none()
+        );
+        assert!(
+            thread
+                .plan_mode_file_edit_error(Some(Path::new(path!("/test/src/main.rs"))), cx)
+                .is_some()
+        );
+    });
+
+    restored
+        .update(cx, |thread, cx| thread.exit_plan_mode(cx))
+        .await
+        .unwrap();
+    restored.read_with(cx, |thread, _cx| {
+        assert_eq!(thread.profile().as_str(), builtin_profiles::ASK);
+    });
+}
+
+#[gpui::test]
+async fn test_plan_mode_blocks_mutating_tools(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/test"),
+        json!({ "src": { "main.rs": "fn main() {}" } }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        )
+    });
+    thread
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    let (event_stream, _rx) = ToolCallEventStream::test_with_thread(thread.downgrade());
+
+    let create_dir = Arc::new(CreateDirectoryTool::new(project.clone()));
+    let result = cx
+        .update(|cx| {
+            create_dir.run(
+                ToolInput::resolved(CreateDirectoryToolInput {
+                    path: path!("/test/src/new_dir").to_string(),
+                    reason: None,
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    let delete = Arc::new(DeletePathTool::new(
+        project.clone(),
+        cx.new(|_cx| ActionLog::new(project.clone())),
+    ));
+    let result = cx
+        .update(|cx| {
+            delete.run(
+                ToolInput::resolved(DeletePathToolInput {
+                    path: path!("/test/src/main.rs").to_string(),
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    let copy = Arc::new(CopyPathTool::new(project.clone()));
+    let result = cx
+        .update(|cx| {
+            copy.run(
+                ToolInput::resolved(CopyPathToolInput {
+                    source_path: path!("/test/src/main.rs").to_string(),
+                    destination_path: path!("/test/src/main2.rs").to_string(),
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    let move_path = Arc::new(MovePathTool::new(project.clone()));
+    let result = cx
+        .update(|cx| {
+            move_path.run(
+                ToolInput::resolved(MovePathToolInput {
+                    source_path: path!("/test/src/main.rs").to_string(),
+                    destination_path: path!("/test/src/renamed.rs").to_string(),
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    let language_registry = project.read_with(cx, |project, _cx| project.languages().clone());
+    let action_log = thread.read_with(cx, |thread, _cx| thread.action_log().clone());
+    let write_file = Arc::new(WriteFileTool::new(
+        project.clone(),
+        thread.downgrade(),
+        action_log,
+        language_registry,
+    ));
+    let result = cx
+        .update(|cx| {
+            write_file.clone().run(
+                ToolInput::resolved(WriteFileToolInput {
+                    path: Path::new(path!("/test/src/main.rs")).to_path_buf(),
+                    content: "fn main() {}".into(),
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Plan mode is active"),
+        "unexpected write_file error: {error}"
+    );
+
+    let rename = Arc::new(RenameTool::new(project.clone()));
+    let result = cx
+        .update(|cx| {
+            rename.run(
+                ToolInput::resolved(RenameToolInput {
+                    symbol: SymbolLocator {
+                        file_path: "src/main.rs".into(),
+                        line: 1,
+                        symbol_name: "main".into(),
+                    },
+                    new_name: "entry".into(),
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    let code_action_store: CodeActionStore = cx.new(|_cx| None);
+    let apply = Arc::new(ApplyCodeActionTool::new(project.clone(), code_action_store));
+    let result = cx
+        .update(|cx| {
+            apply.run(
+                ToolInput::resolved(ApplyCodeActionToolInput { index: 1 }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let terminal = Arc::new(TerminalTool::new(
+        project.clone(),
+        Rc::new(FakeThreadEnvironment::default()),
+    ));
+    let result = cx
+        .update(|cx| {
+            terminal.run(
+                ToolInput::resolved(TerminalToolInput {
+                    command: "echo hi".into(),
+                    cd: ".".into(),
+                    ..Default::default()
+                }),
+                event_stream.clone(),
+                cx,
+            )
+        })
+        .await;
+    assert!(result.unwrap_err().contains("Plan mode is active"));
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let create_thread = Arc::new(CreateThreadTool::new(Rc::new(
+        FakeThreadEnvironment::default(),
+    )));
+    let result = cx
+        .update(|cx| {
+            create_thread.run(
+                ToolInput::resolved(CreateThreadToolInput {
+                    title: "sibling".into(),
+                    prompt: "do work".into(),
+                    agent: None,
+                    model: None,
+                    use_new_worktree: false,
+                    worktree_name: None,
+                    base_ref: None,
+                }),
+                event_stream,
+                cx,
+            )
+        })
+        .await;
+    match result.unwrap_err() {
+        CreateThreadToolOutput::Error { error } => {
+            assert!(
+                error.contains("Plan mode is active"),
+                "unexpected create_thread error: {error}"
+            );
+        }
+        other => panic!("expected create_thread error, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+async fn test_plan_mode_write_plan_file_skips_permission_prompt(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        project::DisableAiSettings::register(cx);
+        agent_settings::AgentSettings::register(cx);
+        language_model::init(cx);
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/test"),
+        json!({ "src": { "main.rs": "fn main() {}" } }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::default());
+
+    let thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        )
+    });
+    thread
+        .update(cx, |thread, cx| thread.enter_plan_mode(cx))
+        .await
+        .unwrap();
+
+    let plan_path = thread.read_with(cx, |thread, _cx| {
+        thread.plan_file().unwrap().absolute_path.clone()
+    });
+    let language_registry = project.read_with(cx, |project, _cx| project.languages().clone());
+    let action_log = thread.read_with(cx, |thread, _cx| thread.action_log().clone());
+    let write_file = Arc::new(WriteFileTool::new(
+        project,
+        thread.downgrade(),
+        action_log,
+        language_registry,
+    ));
+    let (event_stream, mut rx) = ToolCallEventStream::test_with_thread(thread.downgrade());
+
+    let result = cx
+        .update(|cx| {
+            write_file.run(
+                ToolInput::resolved(WriteFileToolInput {
+                    path: plan_path,
+                    content: "# Plan\n\nImplement the feature.\n".into(),
+                }),
+                event_stream,
+                cx,
+            )
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "expected plan file write to succeed, got {result:?}"
+    );
+
+    cx.run_until_parked();
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, Ok(ThreadEvent::ToolCallAuthorization(_))),
+            "plan file writes must not prompt for permission, got {event:?}"
+        );
+    }
+}
+
+#[test]
+fn test_tool_name_normalized_fallback() {
+    assert_eq!(normalize_tool_name_for_lookup("EditFile"), "editfile");
+    assert_eq!(normalize_tool_name_for_lookup("edit_file"), "editfile");
+    assert_eq!(
+        normalize_tool_name_for_lookup("functions.edit_file"),
+        "functionseditfile"
+    );
 }

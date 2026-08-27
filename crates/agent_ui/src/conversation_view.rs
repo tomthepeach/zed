@@ -97,7 +97,7 @@ use crate::{
     OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
     ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
     ScrollOutputToBottom, ScrollOutputToNextMessage, ScrollOutputToPreviousMessage,
-    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode,
+    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage, ToggleFastMode, TogglePlanMode,
     ToggleProfileSelector, ToggleSteerFirstQueuedMessage, ToggleThinkingEffortMenu,
     ToggleThinkingMode, UndoLastReject,
 };
@@ -248,7 +248,12 @@ impl ProfileProvider for Entity<agent::Thread> {
 
     fn set_profile(&self, profile_id: AgentProfileId, cx: &mut App) {
         self.update(cx, |thread, cx| {
-            // Apply the profile and let the thread swap to its default model.
+            if thread.is_plan_mode()
+                && profile_id.as_str() != agent_settings::builtin_profiles::PLAN
+            {
+                thread.exit_plan_mode_to(profile_id, cx).detach();
+                return;
+            }
             thread.set_profile(profile_id, cx);
         });
     }

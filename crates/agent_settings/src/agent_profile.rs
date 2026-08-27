@@ -19,9 +19,21 @@ pub mod builtin_profiles {
     pub const WRITE: &str = "write";
     pub const ASK: &str = "ask";
     pub const MINIMAL: &str = "minimal";
+    pub const PLAN: &str = "plan";
 
     pub fn is_builtin(profile_id: &AgentProfileId) -> bool {
-        profile_id.as_str() == WRITE || profile_id.as_str() == ASK || profile_id.as_str() == MINIMAL
+        profile_id.as_str() == WRITE
+            || profile_id.as_str() == ASK
+            || profile_id.as_str() == MINIMAL
+            || profile_id.as_str() == PLAN
+    }
+
+    /// Whether this profile can be chosen from the profile picker.
+    ///
+    /// Plan mode is a thread overlay entered via its own toggle, not a
+    /// selectable default profile.
+    pub fn is_selectable(profile_id: &AgentProfileId) -> bool {
+        profile_id.as_str() != PLAN
     }
 }
 

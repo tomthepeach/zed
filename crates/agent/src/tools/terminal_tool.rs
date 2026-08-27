@@ -420,6 +420,10 @@ async fn run_terminal_tool(
     event_stream: ToolCallEventStream,
     cx: &mut AsyncApp,
 ) -> Result<String, String> {
+    if let Some(reason) = cx.update(|cx| event_stream.plan_mode_error(None, cx)) {
+        return Err(reason);
+    }
+
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 

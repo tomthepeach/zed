@@ -11,11 +11,13 @@ Profiles do not decide whether a tool call is allowed automatically. Use [Tool P
 
 ## Built-in Profiles {#built-in-profiles}
 
-Zed includes three built-in profiles:
+Zed includes four built-in profiles:
 
 - `Write`: enables tools for reading, editing, and running commands.
 - `Ask`: focuses on read-only codebase questions.
 - `Minimal`: uses no project tools.
+- `Plan`: research and write a plan file only. Entered from the Plan Mode
+  toggle in the agent panel, not by selecting it as the default profile.
 
 ## Configure Profiles {#configure-profiles}
 

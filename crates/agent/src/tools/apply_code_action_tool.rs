@@ -75,7 +75,7 @@ impl AgentTool for ApplyCodeActionTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        _event_stream: ToolCallEventStream,
+        event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
         let project = self.project.clone();
@@ -85,6 +85,10 @@ impl AgentTool for ApplyCodeActionTool {
                 .recv()
                 .await
                 .map_err(|e| format!("Failed to receive tool input: {e}"))?;
+
+            if let Some(reason) = cx.update(|cx| event_stream.plan_mode_error(None, cx)) {
+                return Err(reason);
+            }
 
             let pending = store.update(cx, |store, _cx| store.take()).ok_or_else(|| {
                 "No code actions available. Call get_code_actions first.".to_string()

@@ -86,6 +86,12 @@ pub struct DbThread {
     /// [`crate::sandboxing::ThreadSandboxGrants`].
     #[serde(default)]
     pub sandbox_grants: DbSandboxGrants,
+    #[serde(default)]
+    pub plan_file: Option<crate::DbPlanFile>,
+    #[serde(default)]
+    pub pre_plan_profile: Option<AgentProfileId>,
+    #[serde(default)]
+    pub read_only_during_plan_mode: bool,
 }
 
 /// Serialized form of the sandbox permissions the user granted "for the rest of
@@ -169,6 +175,9 @@ impl SharedThread {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            plan_file: None,
+            pre_plan_profile: None,
+            read_only_during_plan_mode: false,
         }
     }
 
@@ -355,6 +364,9 @@ impl DbThread {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            plan_file: None,
+            pre_plan_profile: None,
+            read_only_during_plan_mode: false,
         })
     }
 }
@@ -806,6 +818,9 @@ mod tests {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            plan_file: None,
+            pre_plan_profile: None,
+            read_only_during_plan_mode: false,
         }
     }
 

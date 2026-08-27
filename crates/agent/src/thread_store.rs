@@ -168,6 +168,9 @@ mod tests {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
+            plan_file: None,
+            pre_plan_profile: None,
+            read_only_during_plan_mode: false,
         }
     }
 

@@ -111,6 +111,11 @@ impl AgentTool for CreateDirectoryTool {
         let project = self.project.clone();
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| e.to_string())?;
+            if let Some(reason) =
+                cx.update(|cx| event_stream.plan_mode_error(Some(Path::new(&input.path)), cx))
+            {
+                return Err(reason);
+            }
 
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
 

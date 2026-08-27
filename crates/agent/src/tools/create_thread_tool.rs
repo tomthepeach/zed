@@ -162,7 +162,7 @@ impl AgentTool for CreateThreadTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        _event_stream: ToolCallEventStream,
+        event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         cx.spawn(async move |cx| {
@@ -172,6 +172,10 @@ impl AgentTool for CreateThreadTool {
                 .map_err(|e| CreateThreadToolOutput::Error {
                     error: format!("Failed to receive tool input: {e}"),
                 })?;
+
+            if let Some(reason) = cx.update(|cx| event_stream.plan_mode_error(None, cx)) {
+                return Err(CreateThreadToolOutput::Error { error: reason });
+            }
 
             let title: SharedString = input.title.clone().into();
             let request = SiblingThreadRequest {

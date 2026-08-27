@@ -58,6 +58,10 @@ pub struct SystemPromptTemplate<'a> {
     pub is_linux: bool,
     /// Whether sandboxed terminal commands run through WSL on Windows.
     pub is_windows: bool,
+    /// Whether this thread is currently in Plan Mode.
+    pub plan_mode: bool,
+    /// Display path of the only file that may be written in Plan Mode.
+    pub plan_file: Option<String>,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -105,6 +109,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -138,6 +144,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -167,6 +175,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -200,6 +210,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -243,6 +255,8 @@ mod tests {
             sandboxing: true,
             is_linux: true,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -276,6 +290,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: true,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -306,6 +322,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -328,6 +346,8 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -348,6 +368,8 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -366,11 +388,56 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
+            plan_file: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
 
         assert!(!rendered.contains("The user has specified the following rules"));
         assert!(!rendered.contains("Rules title:"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_plan_mode_block() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["read_file".into(), "edit_file".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: true,
+            plan_file: Some("test/.zed/plans/abc.md".into()),
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(rendered.contains("## Plan Mode"));
+        assert!(rendered.contains("test/.zed/plans/abc.md"));
+        assert!(rendered.contains("switch to write mode"));
+        assert!(rendered.contains("research-only"));
+        assert!(!rendered.contains("Entering Plan Mode"));
+    }
+
+    #[test]
+    fn test_system_prompt_omits_plan_mode_block_when_inactive() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["echo".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: false,
+            plan_file: None,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(!rendered.contains("## Plan Mode"));
+        assert!(!rendered.contains("switch to write mode"));
     }
 }

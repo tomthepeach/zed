@@ -107,6 +107,9 @@ impl AgentTool for MovePathTool {
                 .recv()
                 .await
                 .map_err(|e| e.to_string())?;
+            if let Some(reason) = cx.update(|cx| event_stream.plan_mode_error(None, cx)) {
+                return Err(reason);
+            }
             let paths = vec![input.source_path.clone(), input.destination_path.clone()];
             let decision = cx.update(|cx| {
                 decide_permission_for_paths(Self::NAME, &paths, AgentSettings::get_global(cx))

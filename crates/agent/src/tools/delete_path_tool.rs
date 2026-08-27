@@ -84,6 +84,9 @@ impl AgentTool for DeletePathTool {
         let action_log = self.action_log.clone();
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| e.to_string())?;
+            if let Some(reason) = cx.update(|cx| event_stream.plan_mode_error(None, cx)) {
+                return Err(reason);
+            }
             let path = input.path;
 
             let decision = cx.update(|cx| {

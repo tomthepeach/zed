@@ -640,6 +640,17 @@ pub fn authorize_file_edit(
         return Task::ready(Err(anyhow!("{}", reason)));
     }
 
+    if let Some(reason) = thread
+        .upgrade()
+        .and_then(|thread| thread.read(cx).plan_mode_file_edit_error(Some(path), cx))
+    {
+        return Task::ready(Err(anyhow!("{}", reason)));
+    }
+
+    let is_plan_file = thread
+        .upgrade()
+        .is_some_and(|thread| thread.read(cx).is_plan_file_path(path));
+
     let path_owned = path.to_path_buf();
     let title = format!("Edit {}", util::markdown::MarkdownInlineCode(&path_str));
     let tool_name = tool_name.to_string();
@@ -714,6 +725,10 @@ pub fn authorize_file_edit(
         }
 
         let explicitly_allowed = matches!(decision, ToolPermissionDecision::Allow);
+
+        if is_plan_file {
+            return Ok(());
+        }
 
         // Check sensitive settings asynchronously. Short-circuit on the
         // raw-path fast paths to skip the canonicalization in

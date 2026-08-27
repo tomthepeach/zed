@@ -1246,6 +1246,29 @@
         "enable_all_context_servers": false,
         "tools": {},
       },
+      "plan": {
+        "name": "Plan",
+        // We don't know which of the context server tools are safe for the "Plan" profile, so we don't enable them by default.
+        // "enable_all_context_servers": true,
+        "tools": {
+          "diagnostics": true,
+          "ask_user": false,
+          "edit_file": true,
+          "write_file": true,
+          "fetch": true,
+          "find_path": true,
+          "find_references": true,
+          "get_code_actions": true,
+          "go_to_definition": true,
+          "list_agents_and_models": true,
+          "list_directory": true,
+          "read_file": true,
+          "grep": true,
+          "skill": true,
+          "spawn_agent": true,
+          "search_web": true,
+        },
+      },
     },
     // Where to show notifications when the agent has either completed
     // its response, or else needs confirmation before it can run a
