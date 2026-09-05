@@ -62,6 +62,9 @@ pub struct SystemPromptTemplate<'a> {
     pub plan_mode: bool,
     /// Display path of the only file that may be written in Plan Mode.
     pub plan_file: Option<String>,
+    /// Display name of the active agent profile. Always current: the system
+    /// prompt is re-rendered from thread state on every request.
+    pub profile_name: String,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -111,6 +114,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -146,6 +150,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -177,6 +182,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -212,6 +218,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -257,6 +264,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -292,6 +300,7 @@ mod tests {
             is_windows: true,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -324,6 +333,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -348,6 +358,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -370,6 +381,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -390,6 +402,7 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -412,6 +425,7 @@ mod tests {
             is_windows: false,
             plan_mode: true,
             plan_file: Some("test/.zed/plans/abc.md".into()),
+            profile_name: "Plan".to_string(),
         };
         let rendered = template.render(&Templates::new()).unwrap();
         assert!(rendered.contains("## Plan Mode"));
@@ -437,6 +451,7 @@ mod tests {
             is_windows: false,
             plan_mode: true,
             plan_file: Some("test/.zed/plans/abc.md".into()),
+            profile_name: "Plan".to_string(),
         };
         let rendered = template.render(&Templates::new()).unwrap();
         assert!(rendered.contains("## Plan Mode"));
@@ -458,9 +473,51 @@ mod tests {
             is_windows: false,
             plan_mode: false,
             plan_file: None,
+            profile_name: "Write".to_string(),
         };
         let rendered = template.render(&Templates::new()).unwrap();
         assert!(!rendered.contains("## Plan Mode"));
         assert!(!rendered.contains("switch to write mode"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_profile_block() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["echo".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: false,
+            plan_file: None,
+            profile_name: "Write".to_string(),
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(rendered.contains("## Agent profile"));
+        assert!(rendered.contains("\"Write\" agent profile"));
+    }
+
+    #[test]
+    fn test_system_prompt_omits_profile_block_without_tools() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec![],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: false,
+            plan_file: None,
+            profile_name: "Minimal".to_string(),
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(!rendered.contains("## Agent profile"));
     }
 }

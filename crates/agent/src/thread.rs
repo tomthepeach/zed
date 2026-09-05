@@ -2370,6 +2370,21 @@ impl Thread {
 
         self.apply_profile_without_subagents(profile_id.clone(), cx);
 
+        // Tell the model its tool set changed, since it may otherwise keep
+        // trusting its own earlier description of the available tools.
+        let profile_name = AgentSettings::get_global(cx)
+            .profiles
+            .get(&self.profile_id)
+            .map(|profile| profile.name.to_string())
+            .unwrap_or_else(|| self.profile_id.as_str().to_string());
+        self.append_history_notice(
+            format!(
+                "[Agent profile switched to \"{}\". The tools available to you have changed — any earlier description of your tools is outdated; rely on the tools provided in the current request.]",
+                profile_name
+            ),
+            cx,
+        );
+
         for subagent in &self.running_subagents {
             subagent
                 .update(cx, |thread, cx| {
@@ -2609,7 +2624,7 @@ impl Thread {
             .as_ref()
             .map(|plan_file| plan_file.display_path.clone())
             .unwrap_or_default();
-        self.append_plan_mode_notice(
+        self.append_history_notice(
             format!("[Plan mode active. Only {display_path} may be edited.]"),
             cx,
         );
@@ -2642,7 +2657,7 @@ impl Thread {
             .as_ref()
             .map(|plan_file| plan_file.display_path.clone())
             .unwrap_or_else(|| "the plan file".to_string());
-        self.append_plan_mode_notice(
+        self.append_history_notice(
             format!(
                 "[Plan mode exited. The plan at {display_path} is approved. Write tools are now available — implement it.]"
             ),
@@ -2684,7 +2699,7 @@ impl Thread {
         }
     }
 
-    fn append_plan_mode_notice(&mut self, text: String, cx: &mut Context<Self>) {
+    fn append_history_notice(&mut self, text: String, cx: &mut Context<Self>) {
         let message = UserMessage {
             id: ClientUserMessageId::new(),
             content: vec![UserMessageContent::Text(text)].into(),
@@ -4812,6 +4827,11 @@ impl Thread {
                 .plan_file
                 .as_ref()
                 .map(|plan_file| plan_file.display_path.clone()),
+            profile_name: AgentSettings::get_global(cx)
+                .profiles
+                .get(&self.profile_id)
+                .map(|profile| profile.name.to_string())
+                .unwrap_or_else(|| self.profile_id.as_str().to_string()),
         }
         .render(&self.templates)
         .context("failed to build system prompt")

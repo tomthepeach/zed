@@ -373,6 +373,7 @@ impl EditToolTest {
                 is_windows: cfg!(target_os = "windows"),
                 plan_mode: false,
                 plan_file: None,
+                profile_name: "Write".to_string(),
             };
             let templates = Templates::new();
             template.render(&templates)?

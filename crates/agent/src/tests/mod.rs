@@ -1688,6 +1688,73 @@ async fn test_profiles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_profile_switch_appends_history_notice(cx: &mut TestAppContext) {
+    let ThreadTest { thread, fs, .. } = setup(cx, TestModel::Fake).await;
+
+    fs.insert_file(
+        paths::settings_file(),
+        json!({
+            "agent": {
+                "profiles": {
+                    "read-only": {
+                        "name": "Read Only",
+                        "tools": {}
+                    },
+                    "can-edit": {
+                        "name": "Can Edit",
+                        "tools": {}
+                    }
+                }
+            }
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    cx.run_until_parked();
+
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("read-only".into()), cx);
+    });
+    let first_notice = thread.read_with(cx, |thread, _cx| {
+        thread
+            .last_received_or_pending_message()
+            .expect("expected a profile switch notice")
+    });
+    assert!(
+        first_notice
+            .to_markdown()
+            .contains("Agent profile switched to \"Read Only\"")
+    );
+
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("can-edit".into()), cx);
+    });
+    let second_notice = thread.read_with(cx, |thread, _cx| {
+        thread
+            .last_received_or_pending_message()
+            .expect("expected a profile switch notice")
+    });
+    assert!(
+        second_notice
+            .to_markdown()
+            .contains("Agent profile switched to \"Can Edit\"")
+    );
+    assert!(!Arc::ptr_eq(&first_notice, &second_notice));
+
+    // Re-selecting the active profile is a no-op and must not append another notice.
+    thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("can-edit".into()), cx);
+    });
+    thread.read_with(cx, |thread, _cx| {
+        let last = thread
+            .last_received_or_pending_message()
+            .expect("expected a profile switch notice");
+        assert!(Arc::ptr_eq(&last, &second_notice));
+    });
+}
+
+#[gpui::test]
 async fn test_mcp_tools(cx: &mut TestAppContext) {
     let ThreadTest {
         model,
