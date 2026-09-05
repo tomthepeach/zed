@@ -403,7 +403,7 @@ mod tests {
         let project = prompt_store::ProjectContext::default();
         let template = SystemPromptTemplate {
             project: &project,
-            available_tools: vec!["read_file".into(), "edit_file".into()],
+            available_tools: vec!["read_file".into(), "edit_file".into(), "spawn_agent".into()],
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -418,7 +418,30 @@ mod tests {
         assert!(rendered.contains("test/.zed/plans/abc.md"));
         assert!(rendered.contains("switch to write mode"));
         assert!(rendered.contains("research-only"));
+        assert!(rendered.contains("Prefer delegating research to subagents"));
+        assert!(rendered.contains("web searches for specific technical details"));
         assert!(!rendered.contains("Entering Plan Mode"));
+    }
+
+    #[test]
+    fn test_system_prompt_omits_plan_mode_subagent_guidance_without_spawn_agent() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["read_file".into(), "edit_file".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: true,
+            plan_file: Some("test/.zed/plans/abc.md".into()),
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(rendered.contains("## Plan Mode"));
+        assert!(rendered.contains("research-only"));
+        assert!(!rendered.contains("Prefer delegating research to subagents"));
     }
 
     #[test]
